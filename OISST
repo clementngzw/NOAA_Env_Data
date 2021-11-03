@@ -1,0 +1,157 @@
+#### Extracting OISST data from NOAA ####
+## Author: Clement Ng
+
+## Set working directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) 
+
+## Libraries used
+library(dplyr)  
+library(plyr)
+library(data.table)
+library(tidync) 
+
+library(rerddap) 
+library(lubridate) 
+
+library(ggplot2) 
+library(viridis)
+library(gganimate)
+library(gifski)
+
+##################################################################
+
+### Downloading the data ###
+rerddap::info(datasetid = "ncdcOisst21Agg_LonPM180", url = "https://coastwatch.pfeg.noaa.gov/erddap/") # Specifying the data to download from erddap
+
+OISST_sub_dl <- function(time_df){
+  OISST_dat <- griddap(x = "ncdcOisst21Agg_LonPM180", 
+                       url = "https://coastwatch.pfeg.noaa.gov/erddap/", 
+                       time = c(time_df$start, time_df$end), 
+                       zlev = c(0, 0),
+                       latitude = c(0, 2),
+                       longitude = c(102, 105),
+                       fields = "sst")$data %>% 
+    mutate(time = as.Date(stringr::str_remove(time, "T00:00:00Z"))) %>% 
+    dplyr::rename(t = time, temp = sst) %>% 
+    select(lon, lat, t, temp) %>% 
+    na.omit()
+} # This function downloads and prepares data based on user provided start and end dates, and the longitude and latitude
+
+dl_years <- data.frame(date_index = 1:5,
+                       start = as.Date(c("1982-01-01", "1990-01-01", 
+                                         "1998-01-01", "2006-01-01", "2014-01-01")),
+                       end = as.Date(c("1989-12-31", "1997-12-31", 
+                                       "2005-12-31", "2013-12-31", "2019-12-31")))
+# specify the years to download the OISST temperature data; unable to download all at once
+
+OISST_data <- dl_years %>% 
+  group_by(date_index) %>% 
+  group_modify(~OISST_sub_dl(.x)) %>% 
+  ungroup() %>% 
+  select(lon, lat, t, temp)
+# dataframe containing the daily temperature data from NOAA
+
+##################################################################
+
+## Check data structure
+oisst_daily_sgp_data <- OISST_data
+head(oisst_daily_sgp_data)
+str(oisst_daily_sgp_data)
+
+## Minimum and maximum sea surface temperatures in Singapore waters
+min(oisst_daily_sgp_data$temp)
+max(oisst_daily_sgp_data$temp)
+
+## Latitude and longitude bins from NOAA
+unique(oisst_daily_sgp_data$lat)
+unique(oisst_daily_sgp_data$lon)
+
+##################################################################
+
+## Calculate the average daily temperature of Singapore waters from 1982 to 2020
+setDT(oisst_daily_sgp_data)[, av.temp := mean(temp), by = .(t)][] 
+
+oisst_daily_sgp_dataAll <- oisst_daily_sgp_data
+oisst_daily_sgp_dataAll <- unique(oisst_daily_sgp_dataAll, by=c("t"))
+oisst_daily_sgp_dataAll$Date <- as.POSIXct(oisst_daily_sgp_dataAll$t, format="%Y-%m-%d")
+oisst_daily_sgp_dataAll <-  subset(oisst_daily_sgp_dataAll, select = -c(3, 4))
+oisst_daily_sgp_dataAll$Site <- "Singapore"
+
+## Plot average daily temperature over time
+oisst_daily_sgp_dataAll %>%
+  ggplot(mapping = aes(x=Date, y=av.temp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Daily Temperature (˚C)")+
+  theme_bw()
+
+mean(oisst_daily_sgp_dataAll$av.temp) # Average ocean temperature from 1982 to 2020
+
+## Calculate the within-site temperature variation in SST in Singapore
+oisst_daily_sgp_dataAll <- ddply(oisst_daily_sgp_dataAll, .(Site), transform, wS.temp = scale(av.temp, scale=F))
+setcolorder(oisst_daily_sgp_dataAll, c('Date', 'lon', 'lat', 'Site', 'av.temp', 'wS.temp'))
+
+oisst_daily_sgp_dataAll %>%
+  ggplot(mapping = aes(x=Date, y=wS.temp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Daily Temperature (˚C)")+
+  theme_bw()
+
+##################################################################
+
+## Create month and year variables for calculating average monthly and annual SST
+oisst_daily_sgp_data$month <- format(as.POSIXct(oisst_daily_sgp_data$t), "%Y-%m")
+oisst_daily_sgp_data$year <- format(as.POSIXct(oisst_daily_sgp_data$t), "%Y")
+
+oisst_monthly_sgp_data <-  subset(oisst_daily_sgp_data, select = -c(5))
+oisst_monthly_sgp_data$Site <- "Singapore"
+setcolorder(oisst_monthly_sgp_data, c('t', 'month', 'year', 'lon', 'lat', 'Site', 'temp'))
+
+## Calculate the average monthly temperature per month 
+setDT(oisst_monthly_sgp_data)[, av.monthtemp := mean(temp), by = .(month)][] 
+oisst_monthly_sgp_data <- unique(oisst_monthly_sgp_data, by=c("month"))
+oisst_monthly_sgp_data <-  subset(oisst_monthly_sgp_data, select = -c(7))
+
+oisst_monthly_sgp_data <- ddply(oisst_monthly_sgp_data, .(Site), transform, wS.monthtemp = scale(av.monthtemp, scale=F))
+setcolorder(oisst_monthly_sgp_data, c('t', 'month', 'year', 'lon', 'lat', 'Site', 'av.monthtemp', 'wS.monthtemp'))
+
+## Plot average monthly temperature over time
+oisst_monthly_sgp_data %>%
+  ggplot(mapping = aes(x=t, y=av.monthtemp))+
+  geom_line(size=0.5)+
+  geom_smooth(method = "lm", size=0.5, color = 'red')+
+  scale_y_continuous(name = "Average Monthly Temperature (˚C)")+
+  theme_bw()
+
+##################################################################
+
+## Make an animation from the OISST temperature data
+animate_sst_data <- OISST_data
+animate_sst_data$Date <- as.POSIXct(animate_sst_data$t, format="%Y-%m-%d")
+animate_sst_data$month <- format(as.POSIXct(animate_sst_data$t), "%Y-%m")
+animate_sst_data$Site <- "Singapore"
+animate_sst_data <-  subset(animate_sst_data, select = -c(3))
+setcolorder(animate_sst_data, c('Date', 'month', 'lon', 'lat', 'Site', 'temp'))
+
+setDT(animate_sst_data)[, av.monthtemp := mean(temp), by = .(month, lon, lat)][] 
+animate_sst_data <- unique(animate_sst_data, by=c("month","lon","lat"))
+
+animate_sst_month <- ggplot(animate_sst_data, aes(x = lon, y = lat)) +
+  geom_tile(aes(fill = av.monthtemp)) +
+  scale_fill_viridis_c(option = "inferno") + 
+  scale_y_continuous(breaks=seq(0.125,2.125,9)) +
+  scale_x_continuous(breaks=seq(102.125,105.125,13)) +
+  coord_quickmap(expand = F) +
+  theme(legend.position = "bottom") +
+  labs(title = "Date: {format(frame_time, '%B %Y' )}", x = 'Longitude', y = 'Latitude', fill = "SST (°C)") +
+  transition_time(Date) +
+  ease_aes('linear')  
+animate(animate_sst_month, renderer = gifski_renderer(), 
+        fps = 15, nframes = 456,
+        width = 640, height = 480)
+anim_save(animate_sst_month, file = 'animate_sst_month.gif')
+
+##################################################################
+
+save.image(file = "NOAA_OISST_code.RData") 
